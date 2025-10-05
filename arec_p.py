@@ -13,7 +13,7 @@ from datetime import datetime
 import schedule
 
 # ========================
-# Конфигурация (аналог arec.txt)
+# Конфигурация
 # ========================
 OUTPUT_DIR = "/opt/arec_p"
 PENDING_DIR = os.path.join(OUTPUT_DIR, "pending")
@@ -21,14 +21,15 @@ LOG_FILE = os.path.join(OUTPUT_DIR, "arec.log")
 
 # Аудио
 SPLIT_TIME = 1800          # секунд
-SAMPLE_RATE = 48000
-SAMPLE_FORMAT = "S24_3LE"
+SAMPLE_RATE = 48000        # критически важная опция для микрофона Boya BY-LM40
+SAMPLE_FORMAT = "S24_3LE"  # критически важная опция для микрофона Boya BY-LM40
 MIC = "default"
 AUDIO_FORMAT = "opus"      # opus, aac, mp3
 BITRATE = 64               # kbps
+FILE_PREFIX = "REC"        # префикс для имён файлов
 
 # Облако
-CLOUD_SERVICE = "yandex"   # "google", "yandex", "none"
+CLOUD_SERVICE = "yandex"   # "google", "yandex", "none" # ← если не нужна выгрузка в облако
 DELETE_AFTER_UPLOAD = True
 RETRY_DELAY = 300
 MAX_RETRIES = 15
@@ -53,8 +54,8 @@ YANDEX_DIR = "/Recordings"
 
 # Расписание (опционально)
 RECORDING_SCHEDULE_ENABLED = True
-RECORDING_START_HOUR = 9
-RECORDING_END_HOUR = 18
+RECORDING_START_HOUR = 6
+RECORDING_END_HOUR = 22
 
 # Веб-стриминг
 ENABLE_WEB_STREAM = True
@@ -134,7 +135,7 @@ def graceful_shutdown(signum, frame):
         except subprocess.TimeoutExpired:
             stream_process.kill()
     cleanup_temp_files()
-    pending_count = len(list(Path(PENDING_DIR).glob(f"REC_*.{AUDIO_FORMAT}")))
+    pending_count = len(list(Path(PENDING_DIR).glob(f"{FILE_PREFIX}_*.{AUDIO_FORMAT}")))
     if pending_count:
         logger.info(f"Завершение с {pending_count} файлами в очереди")
     logger.info("Корректное завершение работы")
@@ -194,7 +195,8 @@ def check_network_speed():
 def recover_interrupted_files():
     logger.info("Восстановление файлов после сбоя...")
     recovered = corrupted = 0
-    for f in Path(OUTPUT_DIR).glob(f"REC_*.{AUDIO_FORMAT}"):
+    pattern = f"{FILE_PREFIX}_*.{AUDIO_FORMAT}"
+    for f in Path(OUTPUT_DIR).glob(pattern):
         if f.stat().st_size > 1024:
             target = Path(PENDING_DIR) / f.name
             f.rename(target)
@@ -274,21 +276,24 @@ def process_upload_queue():
     if CLOUD_SERVICE == "none":
         return
     if not check_internet_access():
-        pending_count = len(list(Path(PENDING_DIR).glob(f"REC_*.{AUDIO_FORMAT}")))
+        pattern = f"{FILE_PREFIX}_*.{AUDIO_FORMAT}"
+        pending_count = len(list(Path(PENDING_DIR).glob(pattern)))
         logger.info(f"Нет интернета. Файлов в очереди: {pending_count}")
         return
 
     pending_size = dir_size_mb(PENDING_DIR)
     if pending_size > MAX_STORAGE_MB:
         logger.warning("Превышен лимит хранилища, очистка...")
-        files = sorted(Path(PENDING_DIR).glob(f"REC_*.{AUDIO_FORMAT}"), key=lambda x: x.stat().st_mtime)
+        pattern = f"{FILE_PREFIX}_*.{AUDIO_FORMAT}"
+        files = sorted(Path(PENDING_DIR).glob(pattern), key=lambda x: x.stat().st_mtime)
         for f in files:
             if dir_size_mb(PENDING_DIR) <= MAX_STORAGE_MB:
                 break
             f.unlink()
             logger.info(f"Удалён старый файл из очереди: {f}")
 
-    files = sorted(Path(PENDING_DIR).glob(f"REC_*.{AUDIO_FORMAT}"), key=lambda x: x.stat().st_mtime, reverse=True)[:10]
+    pattern = f"{FILE_PREFIX}_*.{AUDIO_FORMAT}"
+    files = sorted(Path(PENDING_DIR).glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)[:10]
     if not files:
         return
 
@@ -338,6 +343,19 @@ def start_web_stream():
     logger.info("Запуск веб-стрима...")
     stream_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def check_and_cleanup_storage():
+    """Проверяет и очищает хранилище независимо от интернета"""
+    pending_size = dir_size_mb(PENDING_DIR)
+    if pending_size > MAX_STORAGE_MB:
+        logger.warning(f"Превышен лимит хранилища ({pending_size}MB > {MAX_STORAGE_MB}MB), принудительная очистка...")
+        pattern = f"{FILE_PREFIX}_*.{AUDIO_FORMAT}"
+        files = sorted(Path(PENDING_DIR).glob(pattern), key=lambda x: x.stat().st_mtime)
+        for f in files:
+            if dir_size_mb(PENDING_DIR) <= MAX_STORAGE_MB:
+                break
+            f.unlink()
+            logger.info(f"Удалён старый файл из очереди: {f}")
+
 # ========================
 # Основной цикл
 # ========================
@@ -345,29 +363,37 @@ def start_web_stream():
 def main_loop():
     global in_schedule_mode
     last_connectivity_check = 0
+    last_schedule_log = 0
 
     while not shutdown_event.is_set():
         current_time = time.time()
 
+        # === Проверка расписания ===
         if RECORDING_SCHEDULE_ENABLED:
             if in_recording_schedule():
                 if not in_schedule_mode:
                     logger.info(f"Начало записи по расписанию ({RECORDING_START_HOUR}:00–{RECORDING_END_HOUR}:00)")
                     in_schedule_mode = True
             else:
-                if in_schedule_mode:
-                    logger.info("Время записи завершено. Ожидание...")
+                if in_schedule_mode or (current_time - last_schedule_log > 300):  # Лог каждые 5 минут вне расписания
+                    logger.info(f"Вне расписания записи ({RECORDING_START_HOUR}:00–{RECORDING_END_HOUR}:00). Ожидание...")
                     in_schedule_mode = False
+                    last_schedule_log = current_time
                 time.sleep(60)
                 continue
 
+        # === Периодическая проверка интернета ===
         if current_time - last_connectivity_check >= CONNECTIVITY_CHECK_INTERVAL:
             last_connectivity_check = current_time
             if CLOUD_SERVICE != "none":
                 threading.Thread(target=process_upload_queue, daemon=True).start()
 
+        # === Проверка и очистка хранилища (важно: даже без интернета!) ===
+        check_and_cleanup_storage()
+
+        # === Запись аудио ===
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_path = os.path.join(OUTPUT_DIR, f"REC_{ts}.{AUDIO_FORMAT}")
+        file_path = os.path.join(OUTPUT_DIR, f"{FILE_PREFIX}_{ts}.{AUDIO_FORMAT}")
         logger.info(f"Начало записи: {file_path}")
         if start_recording(file_path):
             process_recorded_file(file_path)
