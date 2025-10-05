@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Установка AREC на Raspberry Pi</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #333; }
+    h1, h2, h3 { color: #2c3e50; }
+    pre, code { background: #f4f4f4; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.95em; }
+    pre { padding: 1rem; overflow-x: auto; border-left: 4px solid #3498db; }
+    .note { background: #fff8e1; padding: 1rem; border-radius: 6px; margin: 1.5rem 0; border-left: 4px solid #ffc107; }
+    .success { background: #e8f5e9; border-left: 4px solid #4caf50; }
+    ul, ol { padding-left: 1.5rem; }
+  </style>
+</head>
+<body>
+
+<h1>Установка скрипта <code>arec_p.py</code> на Raspberry Pi</h1>
+
+<p>Это пошаговая инструкция для пользователей. Скрипт записывает звук, загружает его в облако и транслирует в локальную сеть.</p>
+
+<h2>📌 Что делает скрипт?</h2>
+<ul>
+  <li>Записывает звук с микрофона каждые 30 минут (настраивается в параметрах).</li>
+  <li>Сохраняет в формате Opus (по умолчанию), AAC или MP3.</li>
+  <li>Загружает записи в <strong>Яндекс.Диск</strong> или <strong>Google Drive</strong>.</li>
+  <li>Поддерживает <strong>расписание</strong> (например, только с 9:00 до 18:00).</li>
+  <li>Транслирует звук в локальную сеть — слушать можно через браузер.</li>
+   <li>Скрипт настроен на работу с USB-микрофоном Boya BY-LM40.</li>
+</ul>
+
+<h2>🔧 Шаг 1: Обновите систему</h2>
+<pre><code>sudo apt update && sudo apt upgrade -y</code></pre>
+
+<h2>🔧 Шаг 2: Установите все зависимости</h2>
+<pre><code>sudo apt install -y python3 python3-pip python3-schedule alsa-utils ffmpeg rclone ntpdate icecast2 nginx-light</code></pre>
+
+<blockquote class="note">
+  <strong>Важно!</strong> Пакет <code>python3-schedule</code> обязателен для работы расписания. Без него скрипт не запустится.
+</blockquote>
+
+<p>При установке <code>icecast2</code> появится окно — выберите <strong>«Да»</strong> и задайте пароль (по-умолчанию будет <code>hackme</code>). Потом замените его когда все заработает.</p>
+
+<h2>🔧 Шаг 3: Проверьте микрофон</h2>
+<pre><code>arecord -l</code></pre>
+<p>Если список не пустой — микрофон работает.</p>
+
+<h2>🔧 Шаг 4: Настройте Icecast2</h2>
+<pre><code>sudo nano /etc/icecast2/icecast.xml</code></pre>
+<p>Найдите и убедитесь, что есть:</p>
+<pre><code><source-password>password: hackme</source-password>
+<bind-address>ip-adress: 0.0.0.0</bind-address>
+<port>port: 8000</port></code></pre>
+<p>Сохраните (<kbd>Ctrl+O</kbd> → <kbd>Enter</kbd>) и выйдите (<kbd>Ctrl+X</kbd>).</p>
+<p>Запустите Icecast:</p>
+<pre><code>sudo systemctl enable --now icecast2</code></pre>
+
+<h2>🔧 Шаг 5: Настройте облако (Яндекс.Диск или Google Drive)</h2>
+<pre><code>rclone config</code></pre>
+<p>Следуйте официальным инструкциям для каждого конкретного хранилища. Имя удалённого хранилища должно быть:</p>
+<ul>
+  <li><code>yandex.disk</code> — для Яндекса,</li>
+  <li><code>google.drive</code> — для Google.</li>
+</ul>
+
+<h2>🔧 Шаг 6: Создайте папку и скрипт</h2>
+<pre><code>sudo mkdir -p /opt/arec_p
+sudo nano /opt/arec_p/arec_p.py</code></pre>
+<p>Вставьте <strong>полный код Python-скрипта.</strong> Сохраните и закройте.</p>
+<p>Сделайте исполняемым:</p>
+<pre><code>sudo chmod +x /opt/arec_p/arec_p.py</code></pre>
+
+<h2>🔧 Шаг 7: Настройте параметры</h2>
+<p>Откройте скрипт:</p>
+<pre><code>sudo nano /opt/arec_/arec_p.py</code></pre>
+<p>Измените при необходимости:</p>
+<ul>
+  <li><code>CLOUD_SERVICE = "yandex"</code> → <code>"google"</code> или <code>"none"</code></li>
+  <li><code>ICECAST_PASSWORD = "hackme"</code> → должен совпадать с паролем из Шага 4</li>
+  <li><code>RECORDING_SCHEDULE_ENABLED = True</code> — чтобы включить расписание</li>
+  <li>Время: <code>RECORDING_START_HOUR = 9</code>, <code>RECORDING_END_HOUR = 18</code></li>
+</ul>
+
+<h2>🔧 Шаг 8: Создайте systemd-сервис</h2>
+<pre><code>sudo nano /etc/systemd/system/arec_p.service</code></pre>
+<p>Вставьте:</p>
+<pre><code>[Unit]
+Description=AREC Audio Recorder
+After=network.target icecast2.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/arec_p
+ExecStart=/usr/bin/python3 /opt/arec_p/arec_p.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+
+<h2>🔧 Шаг 9: Запустите скрипт</h2>
+<pre><code>sudo systemctl daemon-reload
+sudo systemctl enable --now arec_p.service</code></pre>
+<p>Проверьте статус:</p>
+<pre><code>sudo systemctl status arec_p</code></pre>
+
+<h2>🔧 Шаг 10: Создайте веб-страницу для стрима</h2>
+<pre><code>sudo nano /var/www/html/stream.html</code></pre>
+<p>Вставьте (замените <code>ВАШ_IP</code> на реальный IP устройства, узнать: <code>hostname -I</code>):</p>
+<xmp><!DOCTYPE html>
+<html>
+<head><title>Live Audio</title></head>
+<body>
+ <h1>🎧 Прямая трансляция звука</h1>
+  <audio controls autoplay>
+    <source src="http://ВАШ_IP:8000/live.mp3" type="audio/mpeg">
+  </audio>
+</body>
+</html></xmp>
+
+<p>Теперь:</p>
+<ul>
+  <li>Файлы записываются в <code>/opt/arec_p/</code>,</li>
+  <li>Загружаются в облако,</li>
+  <li>Стрим доступен по адресу: <code>http://ВАШ_IP/stream.html</code></li>
+</ul>
+
+<div class="success">
+  <p><strong>Совет:</strong> Если что-то не работает — смотрите логи:</p>
+  <pre><code>sudo journalctl -u arec_p -f</code></pre>
+</div>
+
+</body>
+</html>

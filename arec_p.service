@@ -1,0 +1,15 @@
+[Unit]
+Description=AREC Audio Recorder
+After=network.target icecast2.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/arec_p
+ExecStart=/usr/bin/python3 /opt/arec_p/arec_p.py
+Restart=on-failure
+RestartSec=StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
