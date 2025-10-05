@@ -6,11 +6,9 @@ import time
 import signal
 import subprocess
 import logging
-import shutil
 import threading
 from pathlib import Path
 from datetime import datetime
-import schedule
 
 # ========================
 # Конфигурация
@@ -26,7 +24,7 @@ SAMPLE_FORMAT = "S24_3LE"  # критически важная опция для
 MIC = "default"
 AUDIO_FORMAT = "opus"      # opus, aac, mp3
 BITRATE = 64               # kbps
-FILE_PREFIX = "REC"        # префикс для имён файлов
+FILE_PREFIX = "REC"        # Префикс для имён файлов
 
 # Облако
 CLOUD_SERVICE = "yandex"   # "google", "yandex", "none" # ← если не нужна выгрузка в облако
@@ -38,10 +36,10 @@ SLOW_NETWORK_MAX_RETRIES = 5
 NETWORK_SPEED_THRESHOLD = 100
 MAX_PARALLEL_UPLOADS = 3
 CONNECTIVITY_TIMEOUT = 10
-CONNECTIVITY_CHECK_INTERVAL = 180
+CONNECTIVITY_CHECK_INTERVAL = 180  # секунд
 
 # Хранилище
-MAX_STORAGE_MB = 40960
+MAX_STORAGE_MB = 40960     # 40 ГБ
 QUEUE_WARNING_THRESHOLD = 80
 
 # Google Drive
@@ -52,17 +50,17 @@ GOOGLE_DIR = "/Recordings"
 YANDEX_REMOTE = "yandex.disk"
 YANDEX_DIR = "/Recordings"
 
-# Расписание (опционально)
-RECORDING_SCHEDULE_ENABLED = True
-RECORDING_START_HOUR = 6
-RECORDING_END_HOUR = 22
+# Расписание
+RECORDING_SCHEDULE_ENABLED = True # ← работа по расписанию
+RECORDING_START_HOUR = 16         # начало записи
+RECORDING_END_HOUR = 22           # окончание записи
 
 # Веб-стриминг
 ENABLE_WEB_STREAM = True
 ICECAST_HOST = "127.0.0.1"
 ICECAST_PORT = 8000
 ICECAST_PASSWORD = "password"  # ← должен совпадать с <source-password> в icecast.xml
-STREAM_BITRATE = 64          # kbps
+STREAM_BITRATE = 64
 
 # ========================
 # Настройка логгера
@@ -135,7 +133,8 @@ def graceful_shutdown(signum, frame):
         except subprocess.TimeoutExpired:
             stream_process.kill()
     cleanup_temp_files()
-    pending_count = len(list(Path(PENDING_DIR).glob(f"{FILE_PREFIX}_*.{AUDIO_FORMAT}")))
+    pattern = f"{FILE_PREFIX}_*.{AUDIO_FORMAT}"
+    pending_count = len(list(Path(PENDING_DIR).glob(pattern)))
     if pending_count:
         logger.info(f"Завершение с {pending_count} файлами в очереди")
     logger.info("Корректное завершение работы")
@@ -344,7 +343,7 @@ def start_web_stream():
     stream_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def check_and_cleanup_storage():
-    """Проверяет и очищает хранилище независимо от интернета"""
+    """Проверяет и очищает хранилище НЕЗАВИСИМО от интернета"""
     pending_size = dir_size_mb(PENDING_DIR)
     if pending_size > MAX_STORAGE_MB:
         logger.warning(f"Превышен лимит хранилища ({pending_size}MB > {MAX_STORAGE_MB}MB), принудительная очистка...")
@@ -356,6 +355,12 @@ def check_and_cleanup_storage():
             f.unlink()
             logger.info(f"Удалён старый файл из очереди: {f}")
 
+def log_queue_status():
+    """Логирует состояние очереди каждые 3 минуты"""
+    pattern = f"{FILE_PREFIX}_*.{AUDIO_FORMAT}"
+    pending_count = len(list(Path(PENDING_DIR).glob(pattern)))
+    logger.info(f"Файлов в очереди на загрузку: {pending_count}")
+
 # ========================
 # Основной цикл
 # ========================
@@ -363,33 +368,39 @@ def check_and_cleanup_storage():
 def main_loop():
     global in_schedule_mode
     last_connectivity_check = 0
+    last_queue_log = 0
     last_schedule_log = 0
 
     while not shutdown_event.is_set():
         current_time = time.time()
 
-        # === Проверка расписания ===
+        # === Расписание ===
         if RECORDING_SCHEDULE_ENABLED:
             if in_recording_schedule():
                 if not in_schedule_mode:
                     logger.info(f"Начало записи по расписанию ({RECORDING_START_HOUR}:00–{RECORDING_END_HOUR}:00)")
                     in_schedule_mode = True
             else:
-                if in_schedule_mode or (current_time - last_schedule_log > 300):  # Лог каждые 5 минут вне расписания
+                if in_schedule_mode or (current_time - last_schedule_log > 300):  # Каждые 5 минут
                     logger.info(f"Вне расписания записи ({RECORDING_START_HOUR}:00–{RECORDING_END_HOUR}:00). Ожидание...")
                     in_schedule_mode = False
                     last_schedule_log = current_time
                 time.sleep(60)
                 continue
 
-        # === Периодическая проверка интернета ===
+        # === Проверка интернета и загрузка ===
         if current_time - last_connectivity_check >= CONNECTIVITY_CHECK_INTERVAL:
             last_connectivity_check = current_time
             if CLOUD_SERVICE != "none":
                 threading.Thread(target=process_upload_queue, daemon=True).start()
 
-        # === Проверка и очистка хранилища (важно: даже без интернета!) ===
+        # === Обязательная проверка хранилища (даже без интернета!) ===
         check_and_cleanup_storage()
+
+        # === Логирование состояния очереди каждые 3 минуты ===
+        if current_time - last_queue_log >= 180:
+            log_queue_status()
+            last_queue_log = current_time
 
         # === Запись аудио ===
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
